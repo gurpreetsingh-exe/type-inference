@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 from typing import Callable, Dict, List
-from beeprint import pp
 
 
 class Ty:
@@ -32,6 +31,9 @@ class T:
     def __init__(self, node_id: int) -> None:
         self.node_id = node_id
 
+    def __eq__(self, o: T) -> bool:
+        return self.node_id == o.node_id
+
 
 class Int(T):
     __match_args__ = ('node_id', )
@@ -54,10 +56,10 @@ class Float(T):
 
 
 class Normal(T):
-    __match_args__ = ('node_id', 'ty', )
+    __match_args__ = ('ty', )
 
-    def __init__(self, node_id: int, ty: Ty) -> None:
-        super().__init__(node_id)
+    def __init__(self, ty: Ty) -> None:
+        super().__init__(-1)
         self.ty = ty
 
     def __repr__(self) -> str:
@@ -105,6 +107,15 @@ class Ident(Expr):
         self.name = name
 
 
+class Binary(Expr):
+    __match_args__ = ('left', 'right', )
+
+    def __init__(self, left: Expr, right: Expr) -> None:
+        super().__init__()
+        self.left = left
+        self.right = right
+
+
 class Binding(Stmt):
     __match_args__ = ('name', 'ty', 'init')
 
@@ -131,6 +142,7 @@ class Env:
         self.binding_id: Dict[int, str] = {}
         self.unresolved: Dict[int, T] = {}
         self.exprs: Dict[int, Expr] = {}
+        self.paren_exprs: Dict[int, int] = {}
 
     def add_binding(self, name: str, ty: T):
         self.bindings[name] = ty
@@ -139,6 +151,10 @@ class Env:
         if name in self.bindings:
             return self.bindings[name]
 
+    def pop_unres(self, id: int):
+        if id in self.unresolved:
+            self.unresolved.pop(id)
+
 
 def infer_types(fn: Fn, env: Env):
     for stmt in fn.stmts:
@@ -146,7 +162,7 @@ def infer_types(fn: Fn, env: Env):
             case Binding(name, ty, init):
                 inf_ty: T = infer(env, init)
                 if ty:
-                    env.add_binding(name, Normal(init.node_id, ty))
+                    env.add_binding(name, Normal(ty))
                     unify(env, inf_ty, ty)
                 else:
                     env.add_binding(name, inf_ty)
@@ -157,7 +173,7 @@ def infer_types(fn: Fn, env: Env):
 
 def infer(env: Env, expr: Expr) -> T:
     env.exprs[expr.node_id] = expr
-    ty = None
+    ty: T | None = None
     match expr:
         case IntLit():
             ty = Int(expr.node_id)
@@ -168,44 +184,76 @@ def infer(env: Env, expr: Expr) -> T:
             ty = env.find_ty(name)
             if not ty:
                 assert False, f"`{name}` not found in this scope"
+        case Binary(left, right):
+            env.paren_exprs[left.node_id] = expr.node_id
+            env.paren_exprs[right.node_id] = expr.node_id
+            t1 = infer(env, left)
+            t2 = infer(env, right)
+            if t1 != t2:
+                match t1, t2:
+                    case Normal(t01), Normal(t02):
+                        assert t01 == t02, f"type-error: binary op `{t01}` and `{t02}`"
+                        ty = t1
+                    case Int(t01), Int(t02):
+                        ty = Int(expr.node_id)
+                    case Float(t01), Float(t02):
+                        ty = Float(expr.node_id)
+                    case(Normal(t01), (Int(_) | Float(_)) as e) | ((Int(_) | Float(_)) as e, Normal(t01)):
+                        unify(env, e, t01)
+                        ty = t1
+                    case a, b:
+                        assert False, f"{a}, {b}"
+            else:
+                ty = t1
         case _:
             assert False
-    assert ty != None
+    assert ty
     match ty:
         case Int() | Float():
             env.unresolved[expr.node_id] = ty
-        case Normal(_, t):
+        case Normal(t):
             expr.ty = t
     return ty
 
 
 def unify(env: Env, ty: T, expected: Ty):
-    def f(id: int, _f: Callable):
+    def f(_f: Callable):
         # expr = env.exprs[id]
         if _f(expected):
             for i, t in list(env.unresolved.items()):
                 if t != ty:
                     continue
                 iexpr = env.exprs[i]
+                if i in env.paren_exprs:
+                    p_id = env.paren_exprs[i]
+                    pexpr = env.exprs[p_id]
+                    pexpr.ty = expected
+                    env.pop_unres(pexpr.node_id)
+                    match pexpr:
+                        case Binary(left, right):
+                            left.ty = expected
+                            env.pop_unres(left.node_id)
+                            right.ty = expected
+                            env.pop_unres(right.node_id)
                 iexpr.ty = expected
                 if i in env.binding_id:
-                    env.bindings[env.binding_id[i]] = Normal(id, expected)
+                    env.bindings[env.binding_id[i]] = Normal(expected)
                     env.binding_id.pop(i)
-                env.unresolved.pop(i)
+                env.pop_unres(i)
             # expr.ty = expected
         else:
             assert False, f"type-error: expected `{expected}` but got `int`"
 
     match ty:
         case Int(id):
-            f(id, Ty.is_int)
+            f(Ty.is_int)
         case Float(id):
-            f(id, Ty.is_float)
-        case Normal(id, t):
+            f(Ty.is_float)
+        case Normal(t):
             if t != expected:
                 assert False, f"type-error: expected `{expected}` but got `{t}`"
-            if id in env.unresolved:
-                unify(env, env.unresolved[id], expected)
+            # if id in env.unresolved:
+            #     unify(env, env.unresolved[id], expected)
         case _:
             assert False, "unreachable"
 
@@ -227,14 +275,27 @@ def main():
         Binding("a", None, IntLit(20)),
         Binding("b", None, Ident("a")),
         Binding("c", None, Ident("b")),
-        Binding("e", None, Ident("c")),
+        Binding("e", None, Binary(Binary(Ident("c"), IntLit(50)), Ident("a"))),
+        # Binding("e", None, Ident("c")),
         Binding("d", None, FloatLit(20.20)),
     ], Ident("a"))
+
+    fn = Fn("test", Ty("i32"), [
+        Binding("a", None, IntLit(20)),
+        Binding("b", None, Ident("a")),
+        Binding("b", None, Ident("b")),
+    ], Ident("a"))
+
+    fn = Fn("test", Ty("i32"), [
+        Binding("a", Ty("i32"), IntLit(20)),
+        Binding("b", None, Ident("a")),
+        Binding("c", None, Binary(Ident("a"), IntLit(50))),
+    ], Ident("a"))
+
     env = Env()
     infer_types(fn, env)
     for node_id, ty in env.unresolved.items():
         resolve(env, node_id, ty)
-    pp(fn)
 
 
 if __name__ == "__main__":
