@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 from typing import Callable, Dict, List
+from beeprint import pp
+import unittest
 
 
 class Ty:
@@ -272,31 +274,93 @@ def resolve(env: Env, id: int, ty: T):
 
 def main():
     fn = Fn("test", Ty("i32"), [
-        Binding("a", None, IntLit(20)),
-        Binding("b", None, Ident("a")),
-        Binding("c", None, Ident("b")),
-        Binding("e", None, Binary(Binary(Ident("c"), IntLit(50)), Ident("a"))),
-        # Binding("e", None, Ident("c")),
-        Binding("d", None, FloatLit(20.20)),
-    ], Ident("a"))
-
-    fn = Fn("test", Ty("i32"), [
-        Binding("a", None, IntLit(20)),
-        Binding("b", None, Ident("a")),
-        Binding("b", None, Ident("b")),
-    ], Ident("a"))
-
-    fn = Fn("test", Ty("i32"), [
         Binding("a", Ty("i32"), IntLit(20)),
         Binding("b", None, Ident("a")),
-        Binding("c", None, Binary(Ident("a"), IntLit(50))),
+        Binding("c", None, Binary(IntLit(50), Ident("b"))),
     ], Ident("a"))
 
     env = Env()
     infer_types(fn, env)
-    for node_id, ty in env.unresolved.items():
-        resolve(env, node_id, ty)
+    # for node_id, ty in env.unresolved.items():
+    #     resolve(env, node_id, ty)
+    # pp(fn)
+
+
+class TestInfer(unittest.TestCase):
+    def _recursive_check(self, expr: Expr, ty: Ty):
+        self.assertEqual(expr.ty, ty)
+        match expr:
+            case Binary(left, right):
+                self._recursive_check(left, ty)
+                self._recursive_check(right, ty)
+
+    def test_chained_infer(self):
+        fn = Fn("test", Ty("i32"), [
+            Binding("a", None, IntLit(20)),
+            Binding("b", None, Ident("a")),
+            Binding("c", None, Ident("b")),
+            Binding("d", None, Binary(
+                Binary(Ident("c"), IntLit(50)), Ident("a"))),
+        ], Ident("a"))
+        env = Env()
+        infer_types(fn, env)
+        assert fn.last_expr != None
+        ty = Ty("i32")
+        self._recursive_check(fn.last_expr, ty)
+        stmts = fn.stmts
+        for stmt in stmts:
+            assert isinstance(stmt, Binding)
+            self._recursive_check(stmt.init, ty)
+
+    def test_shadow_binding(self):
+        fn = Fn("test", Ty("i32"), [
+            Binding("a", None, IntLit(20)),
+            Binding("b", None, Ident("a")),
+            Binding("b", None, Ident("b")),
+        ], Ident("a"))
+        env = Env()
+        infer_types(fn, env)
+        assert fn.last_expr != None
+        ty = Ty("i32")
+        self._recursive_check(fn.last_expr, ty)
+        stmts = fn.stmts
+        for stmt in stmts:
+            assert isinstance(stmt, Binding)
+            self._recursive_check(stmt.init, ty)
+
+    def test_binary_exp(self):
+        fn = Fn("test", Ty("i32"), [
+            Binding("a", Ty("i32"), IntLit(20)),
+            Binding("b", None, Ident("a")),
+            Binding("c", None, Binary(IntLit(50), Ident("b"))),
+        ], Ident("a"))
+        env = Env()
+        infer_types(fn, env)
+        assert fn.last_expr != None
+        ty = Ty("i32")
+        self._recursive_check(fn.last_expr, ty)
+        stmts = fn.stmts
+        for stmt in stmts:
+            assert isinstance(stmt, Binding)
+            self._recursive_check(stmt.init, ty)
+
+    def test_last_binding_return(self):
+        fn = Fn("test", Ty("i32"), [
+            Binding("a", None, IntLit(20)),
+            Binding("b", None, Ident("a")),
+            Binding("c", None, Binary(Ident("b"), IntLit(50))),
+        ], Ident("c"))
+        env = Env()
+        infer_types(fn, env)
+        assert fn.last_expr != None
+        ty = Ty("i32")
+        self._recursive_check(fn.last_expr, ty)
+        stmts = fn.stmts
+        for stmt in stmts:
+            assert isinstance(stmt, Binding)
+            self._recursive_check(stmt.init, ty)
 
 
 if __name__ == "__main__":
     main()
+    unittest.main()
