@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 from __future__ import annotations
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 from beeprint import pp
 import unittest
 
@@ -10,15 +10,15 @@ class Ty:
     def __init__(self, ty: str) -> None:
         self.ty = ty
 
-    def is_int(self) -> bool:
+    def is_int(self) -> Tuple[bool, str]:
         match self.ty:
-            case "i32" | "i64": return True
-            case _: return False
+            case "i32" | "i64": return True, "int"
+            case _: return False, "int"
 
-    def is_float(self) -> bool:
+    def is_float(self) -> Tuple[bool, str]:
         match self.ty:
-            case "f32" | "f64": return True
-            case _: return False
+            case "f32" | "f64": return True, "float"
+            case _: return False, "float"
 
     def __repr__(self) -> str:
         return f"\033[1;32m{self.ty}\033[0m"
@@ -218,44 +218,45 @@ def infer(env: Env, expr: Expr) -> T:
     return ty
 
 
+def set_type(env: Env, expr: Expr, ty: Ty):
+    expr.ty = ty
+    env.pop_unres(expr.node_id)
+    match expr:
+        case Binary(left, right):
+            set_type(env, left, ty)
+            set_type(env, right, ty)
+        case Ident(name):
+            unify(env, env.bindings[name], ty)
+            env.bindings[name] = Normal(ty)
+
+
 def unify(env: Env, ty: T, expected: Ty):
-    def f(_f: Callable):
-        # expr = env.exprs[id]
-        if _f(expected):
+    def f(is_expected_type: Callable):
+        is_ty = is_expected_type(expected)
+        if is_ty[0]:
             for i, t in list(env.unresolved.items()):
                 if t != ty:
                     continue
                 iexpr = env.exprs[i]
+                set_type(env, iexpr, expected)
                 if i in env.paren_exprs:
                     p_id = env.paren_exprs[i]
                     pexpr = env.exprs[p_id]
-                    pexpr.ty = expected
-                    env.pop_unres(pexpr.node_id)
-                    match pexpr:
-                        case Binary(left, right):
-                            left.ty = expected
-                            env.pop_unres(left.node_id)
-                            right.ty = expected
-                            env.pop_unres(right.node_id)
-                iexpr.ty = expected
+                    set_type(env, pexpr, expected)
                 if i in env.binding_id:
                     env.bindings[env.binding_id[i]] = Normal(expected)
                     env.binding_id.pop(i)
-                env.pop_unres(i)
-            # expr.ty = expected
         else:
-            assert False, f"type-error: expected `{expected}` but got `int`"
+            assert False, f"type-error: expected `{expected}` but got `{is_ty[1]}`"
 
     match ty:
-        case Int(id):
+        case Int(_):
             f(Ty.is_int)
-        case Float(id):
+        case Float(_):
             f(Ty.is_float)
         case Normal(t):
             if t != expected:
                 assert False, f"type-error: expected `{expected}` but got `{t}`"
-            # if id in env.unresolved:
-            #     unify(env, env.unresolved[id], expected)
         case _:
             assert False, "unreachable"
 
@@ -274,16 +275,15 @@ def resolve(env: Env, id: int, ty: T):
 
 def main():
     fn = Fn("test", Ty("i32"), [
-        Binding("a", Ty("i32"), IntLit(20)),
+        Binding("a", None, IntLit(20)),
         Binding("b", None, Ident("a")),
-        Binding("c", None, Binary(IntLit(50), Ident("b"))),
-    ], Ident("a"))
+        Binding("c", None, Binary(Ident("b"), IntLit(50))),
+    ], Ident("c"))
 
     env = Env()
     infer_types(fn, env)
     # for node_id, ty in env.unresolved.items():
     #     resolve(env, node_id, ty)
-    # pp(fn)
 
 
 class TestInfer(unittest.TestCase):
@@ -354,6 +354,21 @@ class TestInfer(unittest.TestCase):
         infer_types(fn, env)
         assert fn.last_expr != None
         ty = Ty("i32")
+        self._recursive_check(fn.last_expr, ty)
+        stmts = fn.stmts
+        for stmt in stmts:
+            assert isinstance(stmt, Binding)
+            self._recursive_check(stmt.init, ty)
+
+        fn = Fn("test", Ty("i32"), [
+            Binding("a", None, IntLit(20)),
+            Binding("b", None, Ident("a")),
+            Binding("c", None, Ident("b")),
+            Binding("d", None, Binary(IntLit(50), Ident("a"))),
+        ], Ident("d"))
+        env = Env()
+        infer_types(fn, env)
+        assert fn.last_expr != None
         self._recursive_check(fn.last_expr, ty)
         stmts = fn.stmts
         for stmt in stmts:
